@@ -1,0 +1,923 @@
+---
+title: "Netflix Movies and Shows Predictions"
+author: "Alaina Liu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{=html}
+<style type="text/css">
+.main-container {
+  max-width: 2400px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+```
+# Introduction
+
+IMDb is the world's most popular online database containing ratings and review for information related to movies, television series, you name it. As consumers, we want to look at what other people think of a movie or show we might be interested in watching, and IMDb is often the go-to destination. The aim of this project is to see what factors might have an influence on predicting a netflix movie or show's genre, and to see whether it's different between the two types. Both of the datasets for movies and shows we are using are from kaggle.
+
+# Exploratory Data Analysis
+
+## Loading Packages
+
+```{r class.source = 'fold-show'}
+library(dplyr)
+library(ggplot2)
+library(tidymodels)
+library(tidyverse)
+library(naniar)
+library(patchwork) # plotting graphs side by side
+library(corrplot) # correlation plot
+library(ggthemes)
+library(kableExtra)
+library(glmnet)
+library(kknn) # for knn
+library(ranger) # for random forest
+library(xgboost) # for boost trees
+library(yardstick)
+library(vip)
+tidymodels_prefer()
+```
+
+## Loading and Exploring the Data
+
+```{r class.source = 'fold-show'}
+movies1 <- read.csv("/Users/alainaliu/Downloads/PSTAT 131/Netflix Project/Best Movies Netflix.csv")
+shows1 <- read.csv("/Users/alainaliu/Downloads/PSTAT 131/Netflix Project/Best Shows Netflix.csv")
+movies1[,-1] %>% kable() %>%
+  kable_styling("striped", full_width = FALSE) %>%
+  scroll_box(height = "420px")
+shows1[,-1] %>% kable() %>%
+  kable_styling("striped", full_width = FALSE) %>%
+  scroll_box(height = "420px")
+nrow(movies1); nrow(shows1)
+```
+
+
+Categories for Movies:
+
+-   Title
+
+-   Release Year
+
+-   IMDb Score
+
+-   Number of Votes
+
+-   Duration (in minutes)
+
+-   Main Genre
+
+-   Main Production (Country Code)
+
+Categories for Shows:
+
+-   Title
+
+-   Release Year
+
+-   IMDb Score
+
+-   Number of Votes
+
+-   Duration (in minutes)
+
+-   Number of Seasons
+
+-   Main Genre
+
+-   Main Production (Country Code)
+
+The two datasets contain the same information with only the exception of shows having an additional variable, number of seasons. There are 387 movie observations and 246 shows observations.
+
+### Tidying the Data
+
+We have a general idea of what we are working with. Next we want to look into each of the variables and check if any transformations need to be done, as well as if there is any missing data.
+
+```{r}
+vis_miss(movies1); vis_miss(shows1)
+```
+
+From the missing values map, there are no missing data, so we will not have to remove any observations here.
+
+```{r}
+m1 <- movies1 %>%
+  group_by(MAIN_GENRE) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x=count, y=reorder(MAIN_GENRE, count))) + 
+  geom_bar(stat = "identity", fill = "#ff9896") + 
+  geom_text(aes(label=count), vjust=0.5, hjust=-0.25, size=3) + 
+  theme_hc() + 
+  labs(x = "Count", y = "Main Genre")
+s1 <- shows1 %>%
+  group_by(MAIN_GENRE) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x=count, y=reorder(MAIN_GENRE, count))) + 
+  geom_bar(stat = "identity", fill = "#c49c94") + 
+  geom_text(aes(label=count), vjust=0.5, hjust=-0.25, size=3) + 
+  theme_hc() + 
+  labs(x = "Count", y = "Main Genre")
+m1 + s1
+
+m2 <- movies1 %>%
+  group_by(MAIN_PRODUCTION) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x=count, y=reorder(MAIN_PRODUCTION, count))) + 
+  geom_bar(stat = "identity", fill = "#ff9896") + 
+  geom_text(aes(label=count), vjust=0.5, hjust=-0.25, size=3) + 
+  theme_hc() + 
+  labs(x = "Count", y = "Main Production")
+s2 <- shows1 %>%
+  group_by(MAIN_PRODUCTION) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x=count, y=reorder(MAIN_PRODUCTION, count))) + 
+  geom_bar(stat = "identity", fill = "#c49c94") + 
+  geom_text(aes(label=count), vjust=0.5, hjust=-0.25, size=3) + 
+  theme_hc() + 
+  labs(x = "Count", y = "Main Production")
+m2 + s2
+```
+
+As we can see, there are 35 different countries for movies and 19 different countries for shows. Since this is a categorical variable, this will create many dummy variables when we create our recipe. Plus, there are many countries with only one observation, so this will not make a good predictor variable for our models. We will group the main production company into regions (Asia/Oceania, North/South America, Europe, and Africa/Middle East) to make the data easier to work with. Similarly, there are a lot of categories for main genre, with 15 for movies and 12 for shows. For this variable, it isn't as straightfoward grouping genres into categories, as they are already split by different genres. Therefore we will drop any levels that contain less than five observations.
+
+```{r}
+m3 <- movies1 %>%
+  ggplot(aes(x=RELEASE_YEAR)) + 
+  geom_histogram(aes(y=..density..), fill = "black") + 
+  geom_density(alpha=0.7, fill="#ff9896") + 
+  theme_hc() + 
+  labs(x = "Release Year", y = "Density")
+s3 <- shows1 %>%
+  ggplot(aes(x=RELEASE_YEAR)) + 
+  geom_histogram(aes(y=..density..), fill = "black") + 
+  geom_density(alpha=0.7, fill="#c49c94") + 
+  theme_hc() + 
+  labs(x = "Release Year", y = "Density")
+m3 + s3
+```
+
+Looking at the bar graphs for release year, we see that the data is heavily skewed left. There are a few observations with release years in the 1900's, but because there are so few we will only look at movies and shows released in or after the year 2000. We will also change release year from a numeric variable to a categorical variable.
+
+```{r class.source = 'fold-show'}
+movies2 <- subset(movies1, MAIN_PRODUCTION!="XX" & RELEASE_YEAR >= 2000) # XX is not a country
+movies_genre_counts <- table(movies2$MAIN_GENRE)
+movies_selected_genres <- movies_genre_counts[movies_genre_counts >= 5]
+movies2 <- subset(movies2, MAIN_GENRE %in% names(movies_selected_genres)) # only keeping main genre levels with more than 5 obs
+movies <- movies2 %>%
+  mutate(REGION = forcats::fct_collapse(MAIN_PRODUCTION,
+                                        AsiaOceania = c("CN", "HK", "ID", "IN", "JP", 
+                                                 "KH", "KR", "TH", "AU", "NZ"),
+                                        AfricaME = c("CD", "MW", "ZA", "PS", "TR"),
+                                        NSAmerica = c("CA", "US", "AR", "BR", "MX"),
+                                        Europe = c("BE", "DE", "DK", "ES", "FR", 
+                                                   "GB", "HU", "IE", "IT", "LT",
+                                                   "NL", "NO", "PL", "UA"))) %>%
+  select(-MAIN_PRODUCTION)
+movies$RELEASE_YEAR <- factor(movies$RELEASE_YEAR, ordered=TRUE)
+
+shows2 <- subset(shows1, RELEASE_YEAR >= 2000)
+shows_genre_counts <- table(shows2$MAIN_GENRE)
+shows_selected_genres <- shows_genre_counts[shows_genre_counts >= 5]
+shows2 <- subset(shows2, MAIN_GENRE %in% names(shows_selected_genres))
+shows <- shows2 %>%
+  mutate(REGION = forcats::fct_collapse(MAIN_PRODUCTION,
+                                        AsiaOceania = c("IN", "JP", "KR", "AU"),
+                                        AfricaME = c("TR", "IL"),
+                                        NSAmerica = c("CA", "US", "BR"),
+                                        Europe = c("BE", "DE", "DK", "ES", "FI",
+                                                   "FR", "GB", "IT", "NO", "SE"))) %>%
+  select(-MAIN_PRODUCTION)
+shows$RELEASE_YEAR <- factor(shows$RELEASE_YEAR, ordered=TRUE)
+```
+
+Let's take a quick look at our new data:
+
+```{r}
+m4 <- movies %>%
+  group_by(MAIN_GENRE) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x=count, y=reorder(MAIN_GENRE, count))) + 
+  geom_bar(stat = "identity", fill = "#ff9896") + 
+  geom_text(aes(label=count), vjust=0.5, hjust=-0.25, size=3) + 
+  theme_hc() + 
+  labs(x = "Count", y = "Main Genre")
+s4 <- shows %>%
+  group_by(MAIN_GENRE) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x=count, y=reorder(MAIN_GENRE, count))) + 
+  geom_bar(stat = "identity", fill = "#c49c94") + 
+  geom_text(aes(label=count), vjust=0.5, hjust=-0.25, size=3) + 
+  theme_hc() + 
+  labs(x = "Count", y = "Main Genre")
+m4 + s4
+
+m5 <- movies %>%
+  group_by(REGION) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x=count, y=reorder(REGION, count))) + 
+  geom_bar(stat = "identity", fill = "#ff9896") + 
+  geom_text(aes(label=count), vjust=0.5, hjust=-0.25, size=3) + 
+  theme_hc() + 
+  labs(x = "Count", y = "Region")
+s5 <- shows %>%
+  group_by(REGION) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x=count, y=reorder(REGION, count))) + 
+  geom_bar(stat = "identity", fill = "#c49c94") + 
+  geom_text(aes(label=count), vjust=0.5, hjust=-0.25, size=3) + 
+  theme_hc() + 
+  labs(x = "Count", y = "Region")
+m5 + s5
+
+m6 <- movies %>%
+  ggplot(aes(x=RELEASE_YEAR)) + 
+  geom_bar(fill = "#ff9896") + 
+  theme_hc() + 
+  labs(x = "Release Year", y = "Count") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6))
+s6 <- shows %>%
+  ggplot(aes(x=RELEASE_YEAR)) + 
+  geom_bar(fill = "#c49c94") + 
+  theme_hc() + 
+  labs(x = "Release Year", y = "Count") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6))
+m6 + s6
+```
+
+## Visual EDA
+
+### Variable Distributions
+
+Before getting into our model building, we want to look at the distribution of movies and shows. Let's look at the distribution of scores, main genres, and regions.
+
+```{r}
+movies$TYPE <- rep("movie", nrow(movies))
+shows$TYPE <- rep("show", nrow(shows))
+netflix_combined <- dplyr::bind_rows(movies[c(3:9)], shows[c(3:6,8:10)])
+
+netflix_combined %>%
+  ggplot(aes(x=TYPE, y=SCORE, fill=TYPE)) + 
+  geom_boxplot() +
+  theme_hc() + 
+  scale_fill_manual(values = c("#ff9896", "#c49c94")) + 
+  labs(x = "Type", y = "Score", title = "Box Plot of Score Distribution", fill = "Type")
+
+netflix_combined %>%
+  ggplot(aes(x=TYPE, fill=MAIN_GENRE)) +
+  geom_bar() + 
+  theme_hc() + 
+  labs(x = "Type", y = "Count", title = "Stacked Bar Chart of Main Genres", fill = "Main Genre")
+
+netflix_combined %>%
+  ggplot(aes(x=TYPE, fill=REGION)) +
+  geom_bar() + 
+  theme_hc() + 
+  labs(x = "Type", y = "Count", title = "Stacked Bar Chart of Regions", fill = "Region")
+
+netflix_combined %>%
+  ggplot(aes(x=NUMBER_OF_VOTES, fill=TYPE)) + 
+  geom_density(alpha = 0.7) + 
+  scale_fill_manual(values = c("#ff9896", "#c49c94")) + 
+  theme_hc() + 
+  labs(x = "Number of Votes", y = "Density", title = "Density Plot of Number of Votes", fill = "Type")
+```
+
+Here are some things we observe:
+
+-   SCORE: Movie scores range from 6.9 to 9.0 and show scores range from 7.5 to 9.5. Show scores have a higher median than movie scores, but their ranges are about the same.
+
+-   MAIN GENRE: For both movies and shows, drama is the genre with the most observations, making up about 1/3 of each dataset. This is followed by thriller then comedy for movies, and comedy and scifi for shows. This distribution is very obviously heavily uneven, which is something we'll have to keep in mind when we're building our models.
+
+-   REGION: For movies, there is a decent proportion of observations rom North/South America, Asia/Oceania, and Europe/Middle East, with only two observations in Africa. For shows, over half of the observations are from North/South America.
+
+-   NUMBER OF VOTES: The distribution of the number of votes is heavily skewed right. This aligns with our understanding that most movies and shows will have less votes, and only a few really popular ones have a higher nunber of votes.
+
+Now that we have explored individual variables, we want to look at if there is any relationship between variables.
+
+### Variable Correlation Plot
+
+```{r}
+movies %>%
+  dplyr::select(SCORE, NUMBER_OF_VOTES, DURATION) %>%
+  cor() %>%
+  corrplot(type="lower", method="color", diag=FALSE, addCoef.col = "black", number.cex = 1)
+
+shows %>%
+  dplyr::select(SCORE, NUMBER_OF_VOTES, DURATION, NUMBER_OF_SEASONS) %>%
+  cor() %>%
+  corrplot(type="lower", method="color", diag=FALSE, addCoef.col = "black", number.cex = 1)
+```
+
+While our dataset does not contain many numeric variables, it is still interesting to look at the correlation plot of what we have. The strongest correlation is the number of votes and score. This may be explained by the fact that the more popular a movie or show is, the more high scores it receives. The number of seasons of a show and the number of votes also has a moderately strong correlation. This also isn't surprising, as a show having more seasons often means it is popular and long-running and will accumulate more votes.
+
+### Genre and Score
+
+```{r, echo=FALSE}
+m7 <- movies %>%
+  ggplot(aes(y=MAIN_GENRE, x=SCORE)) + 
+  geom_boxplot(fill="#ff9896") + 
+  theme_hc() + 
+  labs(x = "Score", y = "Main Genre", title="Movies")
+s7 <- shows %>%
+  ggplot(aes(y=MAIN_GENRE, x=SCORE)) + 
+  geom_boxplot(fill="#c49c94") + 
+  theme_hc() + 
+  labs(x = "Score", y = "Main Genre", title="Shows")
+m7 + s7
+```
+
+Since main genre is our variable of interest, we want to see how each genre is correlated with our predictor variables. In this plot we see the distribution of scores for each genre of movies and shows. For movies, there is a wide range of score values for each genre. Scifi, documentary, and comedy have the highest median as well as range, as horror has the lowest. For shows, there is not much of a drastic difference in score ranges compared to the movies plot. Drama, documentary, scifi, and action have the largest range while war has the smallest.
+
+### Score and Number of Votes
+
+```{r}
+m8 <- movies %>%
+  ggplot(aes(x=SCORE, y=NUMBER_OF_VOTES, color=MAIN_GENRE)) + 
+  geom_point() + 
+  theme_hc() + 
+  labs(x = "Score", y = "Number of Votes", title="Movies", color = "Main Genre") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        legend.key.size = unit(1, 'cm'),
+        legend.key.height = unit(0.5, 'cm'),
+        legend.key.width = unit(0.5, 'cm'),
+        legend.title = element_text(size=6),
+        legend.text = element_text(size=4))
+s8 <- shows %>%
+  ggplot(aes(x=SCORE, y=NUMBER_OF_VOTES, color=MAIN_GENRE)) + 
+  geom_point() + 
+  theme_hc() + 
+  labs(x = "Score", y = "Number of Votes", title="Shows", color = "Main Genre") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8),
+        legend.key.size = unit(0.5, 'cm'),
+        legend.key.height = unit(0.5, 'cm'),
+        legend.key.width = unit(0.5, 'cm'),
+        legend.title = element_text(size=6),
+        legend.text = element_text(size=4))
+m8 + s8
+```
+
+From the plots we see most movies have below 800,000 votes and most shows have below 500,000 with a few outliers. The observations with a high number of votes all have a high score as well. Main genre appears to be evenly scattered in the plot, so there might not be a high correlation between either variable and genre.
+
+### Genre and Duration
+
+```{r}
+m9 <- movies %>%
+  ggplot(aes(y=MAIN_GENRE, x=DURATION)) + 
+  geom_boxplot(fill="#ff9896") + 
+  theme_hc() + 
+  labs(x = "Duration", y = "Main Genre", title = "Movies")
+s9 <- shows %>%
+  ggplot(aes(y=MAIN_GENRE, x=DURATION)) + 
+  geom_boxplot(fill="#c49c94") + 
+  theme_hc() + 
+  labs(x = "Duration", y = "Main Genre", title = "Shows")
+m9 + s9
+```
+
+There is an abundant amount of variation in duration between different genres for both movies and shows. For movies, scifi has the highest median duration with western, romance, drama, and crime closely behind. Drama contains many outliers of longer durations. For shows, crime has the highest median, and comedy has the lowest. Because of these clear distinctions, duration might be a good predictor for main genre.
+
+### Number of Seasons
+
+The number of seasons is only present in our shows dataset. Let's look at how it relates to the other variables.
+
+```{r}
+shows %>%
+  ggplot(aes(x=NUMBER_OF_SEASONS, y=NUMBER_OF_VOTES, color=MAIN_GENRE)) + 
+  geom_point() + 
+  theme_hc() + 
+  labs(x = "Number of Seasons", y = "Number of Votes", title = "Scatterplot of Number of Votes against Number of Seasons", color = "Main Genre")
+
+shows %>%
+  ggplot(aes(x=MAIN_GENRE, y=NUMBER_OF_SEASONS)) + 
+  geom_boxplot() + 
+  theme_hc() +
+  labs(x = "Main Genre", y = "Number of Seasons", title = "Box Plot of Number of Seasons per Genre")
+```
+
+Here we are looking at relationships with the number of seasons for shows only. There does not appear to be an obvious relationship between the number of seasons and the number of votes, but upon a closer glance we see that all the shows with a high number of votes have at least 5 seasons. In the boxplot distribution of the number of seasons for each genre, we see that comedy has the highest median, but action and drama have multiple outliers with the highest number of seasons. Documentary is the genre with the least number of seasons, which makes sense.
+
+# Setting up Models
+
+## Train/Test Split
+
+Before building our models, we need to split the data into training and testing data sets. I will be using a 80/20 split and stratifying on the outcome variable, score, for both datasets. We will be building our models on our training set. Furthermore, we will be using the k-fold cross-validation method with five folds to evaluate the model's test error rate on new data.
+
+```{r class.source = 'fold-show'}
+set.seed(131) # setting a seed to replicate results
+movies_split <- initial_split(movies, prop=0.8, strata=MAIN_GENRE)
+movies_train <- training(movies_split)
+movies_test <- testing(movies_split)
+
+shows_split <- initial_split(shows, prop=0.8, strata=MAIN_GENRE)
+shows_train <- training(shows_split)
+shows_test <- testing(shows_split)
+
+nrow(movies_train); nrow(movies_test)
+nrow(shows_train); nrow(shows_test)
+```
+
+For movies, there are 260 observations in the training dataset and 67 in the testing dataset. For shows, there are 180 in training and 46 in testing.
+
+## Building Our Recipe
+
+Next, we are going to build a recipe for all our models. This recipe is like a general guide of which predictors to use, how to use them, and what to do with them. Each model that we build will be using the same recipe, but will work with it in their own way unique to that specific model. The variables we are using to predict the main genre are release year, score, number of votes, duration, and region for movies, and the same plus number of seasons for shows.
+
+```{r class.source = 'fold-show'}
+movies_recipe <- movies_train %>%
+  recipe(MAIN_GENRE ~ RELEASE_YEAR + NUMBER_OF_VOTES + DURATION + SCORE + REGION) %>%
+  step_naomit() %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_interact(terms = ~ NUMBER_OF_VOTES:SCORE) %>%
+  step_normalize(NUMBER_OF_VOTES, DURATION, SCORE)
+
+shows_recipe <- shows_train %>%
+  recipe(MAIN_GENRE ~ RELEASE_YEAR + NUMBER_OF_VOTES + DURATION + NUMBER_OF_SEASONS + SCORE + REGION) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_interact(terms = ~ NUMBER_OF_SEASONS:NUMBER_OF_VOTES + NUMBER_OF_VOTES:SCORE) %>%
+  step_normalize(NUMBER_OF_VOTES, NUMBER_OF_SEASONS, DURATION, SCORE)
+```
+
+```{r}
+movies_recipe %>%
+  prep() %>%
+  bake(new_data = movies_train) %>%
+  head() %>%
+  kable() %>%
+  kable_styling("striped", full_width = TRUE) %>%
+  scroll_box(width = "1000px", height = "250px")
+
+shows_recipe %>%
+  prep() %>%
+  bake(new_data = shows_train) %>%
+  head() %>%
+  kable() %>%
+  kable_styling("striped", full_width = TRUE) %>%
+  scroll_box(width = "1000px", height = "250px")
+```
+
+## K-Fold Cross Validation
+
+We will split our data into five different folds using k-fold cross-validation. This cross validation technique is used to estimate the test error rate using available training data by dividing the set of observations into k roughly equal size groups, or folds, then treating each fold as the validation set in turns and fitting the method on the other folds until each fold has been treated as the validation set. Using k-fold cross-validation rather than simply comparing our model results on the entire training set will help with avoiding overfitting to the training data, and will reduce the variance of the performance estimate.
+
+
+```{r class.source = 'fold-show'}
+movies_folds <- vfold_cv(movies_train, v=5)
+shows_folds <- vfold_cv(shows_train, v=5)
+
+movies_folds; shows_folds
+```
+
+# Building Models
+
+## Model Building Process
+
+**1. Set up the model by specifying the type of model and its parameters, and setting up the engine and mode.**
+
+We will be building a total of five models for both movies and shows:
+
+-   K-nearest neighbors (tuning number of neighbors)
+
+-   Elastic net regression (tuning mixture and penalty)
+
+-   Pruned decision trees (tuning cost complexity)
+
+-   Random forest (tuning the number of predictors, number of trees, and minimum number of observations in a node)
+
+-   Gradient-boosted trees (tuning the number of predictors, number of trees, and the learning rate)
+
+For each of the models, the mode is set as classification, as that is our goal.
+
+```{r}
+# knn
+movies_knn <- nearest_neighbor(neighbors=tune()) %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+shows_knn <- nearest_neighbor(neighbors=tune()) %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+
+# elastic net multinomial regression
+movies_en <- multinom_reg(mixture = tune(), penalty = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("glmnet")
+shows_en <- multinom_reg(mixture = tune(), penalty = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("glmnet")
+
+# pruned decision trees
+movies_tree <- decision_tree(cost_complexity = tune()) %>%
+  set_engine("rpart") %>%
+  set_mode("classification")
+shows_tree <- decision_tree(cost_complexity = tune()) %>%
+  set_engine("rpart") %>%
+  set_mode("classification")
+
+# random forest
+movies_forest <- rand_forest(mtry = tune(),
+                             trees = tune(),
+                             min_n = tune()) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+shows_forest <- rand_forest(mtry = tune(),
+                            trees = tune(),
+                            min_n = tune()) %>%
+  set_engine("ranger") %>%
+  set_mode("classification")
+
+# gradient-boosted trees
+movies_bt <- boost_tree(mtry = tune(),
+                        trees = tune(),
+                        learn_rate = tune()) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+shows_bt <- boost_tree(mtry = tune(),
+                        trees = tune(),
+                        learn_rate = tune()) %>%
+  set_engine("xgboost") %>%
+  set_mode("classification")
+```
+
+**2. Set up the workflow using the workflow() function and add the established model and recipe.**
+
+```{r}
+# knn
+movies_knn_workflow <- workflow() %>%
+  add_model(movies_knn) %>%
+  add_recipe(movies_recipe)
+shows_knn_workflow <- workflow() %>%
+  add_model(shows_knn) %>%
+  add_recipe(shows_recipe)
+
+# elastic net multinomial regression
+movies_en_workflow <- workflow() %>%
+  add_model(movies_en) %>%
+  add_recipe(movies_recipe)
+shows_en_workflow <- workflow() %>%
+  add_model(shows_en) %>%
+  add_recipe(shows_recipe)
+
+# pruned decision trees
+movies_tree_workflow <- workflow() %>%
+  add_model(movies_tree) %>%
+  add_recipe(movies_recipe)
+shows_tree_workflow <- workflow() %>%
+  add_model(shows_tree) %>%
+  add_recipe(shows_recipe)
+
+# random forest
+movies_forest_workflow <- workflow() %>%
+  add_model(movies_forest) %>%
+  add_recipe(movies_recipe)
+shows_forest_workflow <- workflow() %>%
+  add_model(shows_forest) %>%
+  add_recipe(shows_recipe)
+
+# gradient-boosted trees
+movies_bt_workflow <- workflow() %>%
+  add_model(movies_bt) %>%
+  add_recipe(movies_recipe)
+shows_bt_workflow <- workflow() %>%
+  add_model(shows_bt) %>%
+  add_recipe(shows_recipe)
+```
+
+**3. Set up tuning grids for the parameters we want tuned, and specify the ranges as well as the number of levels we want.**
+
+```{r}
+# knn
+movies_knn_grid <- grid_regular(neighbors(range=c(1, 10)), levels=10)
+shows_knn_grid <- movies_knn_grid
+
+# en
+movies_en_grid <- grid_regular(penalty(range=c(0,3), 
+                                trans = identity_trans()), 
+                                mixture(range=c(0, 1)), levels=10)
+shows_en_grid <- movies_en_grid
+
+# pruned decision trees
+movies_tree_grid <- grid_regular(cost_complexity(range = c(-3, -1)), levels = 10)
+shows_tree_grid <- movies_tree_grid
+
+# random forest
+movies_forest_grid <- grid_regular(mtry(range = c(1, 6)), 
+                        trees(range = c(200, 600)),
+                        min_n(range = c(10, 20)), 
+                        levels = 5)
+shows_forest_grid <- movies_forest_grid
+
+# gradient-boosted trees
+movies_bt_grid <- grid_regular(mtry(range = c(1, 6)), 
+                        trees(range = c(200, 600)),
+                        learn_rate(range = c(-10, -1)),
+                        levels = 5)
+shows_bt_grid <- movies_bt_grid
+```
+
+**4. Tune each of the models using the workflow as the object, folds as the resamples, and created grids.**
+
+```{r, eval=FALSE}
+# knn
+movies_knn_tune <- tune_grid(
+  object = movies_knn_workflow,
+  resamples = movies_folds,
+  grid = movies_knn_grid,
+)
+shows_knn_tune <- tune_grid(
+  object = shows_knn_workflow,
+  resamples = shows_folds,
+  grid = shows_knn_grid,
+)
+
+# elastic net multinomial regression
+movies_en_tune <- tune_grid(
+  object = movies_en_workflow,
+  resamples = movies_folds,
+  grid = movies_en_grid
+)
+shows_en_tune <- tune_grid(
+  object = shows_en_workflow,
+  resamples = shows_folds,
+  grid = shows_en_grid
+)
+
+# pruned decision tree
+movies_tree_tune <- tune_grid(
+  object = movies_tree_workflow,
+  resamples = movies_folds,
+  grid = movies_tree_grid
+)
+shows_tree_tune <- tune_grid(
+  object = shows_tree_workflow,
+  resamples = shows_folds,
+  grid = shows_tree_grid
+)
+
+# random forest
+movies_forest_tune <- tune_grid(
+  object = movies_forest_workflow,
+  resamples = movies_folds,
+  grid = movies_forest_grid
+)
+shows_forest_tune <- tune_grid(
+  object = shows_forest_workflow,
+  resamples = shows_folds,
+  grid = shows_forest_grid
+)
+
+# gradient-boosted trees
+movies_bt_tune <- tune_grid(
+  object = movies_bt_workflow,
+  resamples = movies_folds,
+  grid = movies_bt_grid
+)
+shows_bt_tune <- tune_grid(
+  object = shows_bt_workflow,
+  resamples = shows_folds,
+  grid = shows_bt_grid
+)
+```
+
+Because tuning each of the models takes a long time, we will save the results after running them into RDA files so that we don't have to rerun them every time.
+
+```{r, eval=FALSE}
+save(movies_knn_tune, file="movies_knn_results.rda")
+save(movies_en_tune, file="movies_en_results.rda")
+save(movies_tree_tune, file="movies_tree_results.rda")
+save(movies_forest_tune, file="movies_forest_results.rda")
+save(movies_bt_tune, file="movies_bt_results.rda")
+
+save(shows_knn_tune, file="shows_knn_results.rda")
+save(shows_en_tune, file="shows_en_results.rda")
+save(shows_tree_tune, file="shows_tree_results.rda")
+save(shows_forest_tune, file="shows_forest_results.rda")
+save(shows_bt_tune, file="shows_bt_results.rda")
+```
+
+**5. Load the saved results back in to use for our analysis.**
+
+```{r}
+load(file="movies_knn_results.rda")
+load(file="movies_en_results.rda")
+load(file="movies_tree_results.rda")
+load(file="movies_forest_results.rda")
+load(file="movies_bt_results.rda")
+
+load(file="shows_knn_results.rda")
+load(file="shows_en_results.rda")
+load(file="shows_tree_results.rda")
+load(file="shows_forest_results.rda")
+load(file="shows_bt_results.rda")
+```
+
+**6. Collect metrics of the tuned models.**
+
+```{r}
+movies_knn_metrics <- collect_metrics(movies_knn_tune)
+movies_en_metrics <- collect_metrics(movies_en_tune)
+movies_tree_metrics <- collect_metrics(movies_tree_tune)
+movies_forest_metrics <- collect_metrics(movies_forest_tune)
+movies_bt_metrics <- collect_metrics(movies_bt_tune)
+
+shows_knn_metrics <- collect_metrics(shows_knn_tune)
+shows_en_metrics <- collect_metrics(shows_en_tune)
+shows_tree_metrics <- collect_metrics(shows_tree_tune)
+shows_forest_metrics <- collect_metrics(shows_forest_tune)
+shows_bt_metrics <- collect_metrics(shows_bt_tune)
+```
+
+# Model Results
+
+We have collected metrics from our model results, so now it is finally time to compare them and see which model was the best fit for our dataset. The performance is measured by the area under the ROC curve (ROC AUC), which measures the overall performance of our classifiers. A higher AUC means a better performance.
+
+Let's look at the plotted results from our models. The autoplot function in R allows us to visualize the result of each tuned parameter in our models.
+
+## K-nearest neighbors
+
+```{r}
+autoplot(movies_knn_tune)
+autoplot(shows_knn_tune)
+```
+
+We tuned our k-nearest neighbors models at 10 levels from 1 to 10 neighbors. For movies, the highest ROC AUC was 0.538 with k = 3. For shows, the highest ROC AUC was 0.653 with k = 2.
+
+## Elastic Net
+
+```{r}
+autoplot(movies_en_tune)
+autoplot(shows_en_tune)
+```
+
+We tuned our elastic net models at 10 levels of penalty and mixture. For movies, our best ROC AUC was 0.681 with penalty = 0 and mixture = 0 . For shows, our best ROC AUC was 0.661 with penalty = 0 and mixture = 0. Both values are the highest ROC AUC value for both models.
+
+## Decision Tree
+
+```{r}
+autoplot(movies_tree_tune)
+autoplot(shows_tree_tune)
+```
+
+For our decision tree model, we tuned 10 levels of cost complexity from -3 to 1. Our best ROC AUC for movies was 0.6 with a cost complexity of 0.0359. This did better than our knn model, but not as well as the elastic net model. The highest ROC AUC for shows was 0.611 with 0.0599. This did not do as well as the other two models.
+
+## Random Forest
+
+```{r}
+autoplot(movies_forest_tune)
+autoplot(shows_forest_tune)
+```
+
+For our random forest model, we tuned 5 levels of the number of predictors from 1 to 6, the number of trees from 200 to 600, and the minimum number of data points per node from 10 to 20. The highest ROC AUC was 0.63 for movies with mtry = 6, trees = 400, and min_n = 17, and 0.637 for shows with mtry = 4, trees = 200, and min_n = 20. Both of these are very high, and may be worth looking into.
+
+## Boosted Trees
+
+```{r}
+autoplot(movies_bt_tune)
+autoplot(shows_bt_tune)
+```
+
+We tuned 5 levels of number of predictors from 1 to 6, number of trees from 200 to 600, and learning rate from -10 to -1 for our boosted trees model. The highest ROC AUC for movies was 0.625 with mtry = 6, trees = 300, and learn_rate = 0.1, just behind the random forest model. For shows it was 0.629 with mtry = 2, trees = 600, and learn_rate = 0.1.
+
+## Best Model
+
+Here is a visualization of the highest ROC AUC produced by each of our models.
+
+```{r}
+movies_knn_highest <- bind_cols(arrange(movies_knn_metrics[movies_knn_metrics$.metric=="roc_auc","mean"], desc(mean))[1,], "K-nearest neighbors")
+movies_en_highest <- bind_cols(arrange(movies_en_metrics[movies_en_metrics$.metric=="roc_auc","mean"], desc(mean))[1,], "Elastic Net")
+movies_tree_highest <- bind_cols(arrange(movies_tree_metrics[movies_tree_metrics$.metric=="roc_auc","mean"], desc(mean))[1,], "Pruned Decision Tree")
+movies_forest_highest <- bind_cols(arrange(movies_forest_metrics[movies_forest_metrics$.metric=="roc_auc","mean"], desc(mean))[1,], "Random Forest")
+movies_bt_highest <- bind_cols(arrange(movies_bt_metrics[movies_bt_metrics$.metric=="roc_auc","mean"], desc(mean))[1,], "Boosted Decision Tree")
+
+shows_knn_highest <- bind_cols(arrange(shows_knn_metrics[shows_knn_metrics$.metric=="roc_auc","mean"], desc(mean))[1,], "K-nearest neighbors")
+shows_en_highest <- bind_cols(arrange(shows_en_metrics[shows_en_metrics$.metric=="roc_auc","mean"], desc(mean))[1,], "Elastic Net")
+shows_tree_highest <- bind_cols(arrange(shows_tree_metrics[shows_tree_metrics$.metric=="roc_auc","mean"], desc(mean))[1,], "Pruned Decision Tree")
+shows_forest_highest <- bind_cols(arrange(shows_forest_metrics[shows_forest_metrics$.metric=="roc_auc","mean"], desc(mean))[1,], "Random Forest")
+shows_bt_highest <- bind_cols(arrange(shows_bt_metrics[shows_bt_metrics$.metric=="roc_auc","mean"], desc(mean))[1,], "Boosted Decision Tree")
+
+movies_results <- bind_rows(movies_knn_highest, movies_en_highest, movies_tree_highest, movies_forest_highest, movies_bt_highest)
+colnames(movies_results) <- c("ROC_AUC", "Model")
+shows_results <- bind_rows(shows_knn_highest, shows_en_highest, shows_tree_highest, shows_forest_highest, shows_bt_highest)
+colnames(shows_results) <- c("ROC_AUC", "Model")
+
+movies_results %>%
+  ggplot(aes(x=Model, y=ROC_AUC)) + 
+  geom_col(fill="#ff9896") + 
+  geom_text(aes(label = round(ROC_AUC, 3)), vjust = -0.5) + 
+  ylim(0, 1) + 
+  theme_hc() + 
+  labs(y = "ROC AUC", title = "Comparing ROC AUC for Movies")
+
+shows_results %>%
+  ggplot(aes(x=Model, y=ROC_AUC)) + 
+  geom_col(fill="#c49c94") + 
+  geom_text(aes(label = round(ROC_AUC, 3)), vjust = -0.5) + 
+  ylim(0, 1) + 
+  theme_hc() + 
+  labs(y = "ROC AUC", title = "Comparing ROC AUC for Shows")
+```
+
+Once again, the elastic net model resulted in the highest ROC AUC value for both the movies and shows dataset. For both, the penalty and mixture happen to be 0. This is the model we will be using to fit to our testing dataset.
+
+```{r class.source = 'fold-show'}
+show_best(movies_en_tune, metric="roc_auc")[1,] %>% kable()
+show_best(shows_en_tune, metric="roc_auc")[1,] %>% kable()
+```
+
+Before fitting the model to our testing sets, we will finalize the elastic net workflow using our best model, then fit it to our entire training dataset.
+
+```{r class.source = 'fold-show'}
+movies_best <- select_best(movies_en_tune, metric="roc_auc")
+movies_final_workflow <- finalize_workflow(movies_en_workflow, movies_best)
+movies_final_fit <- fit(movies_final_workflow, movies_train)
+
+shows_best <- select_best(shows_en_tune, metric="roc_auc")
+shows_final_workflow <- finalize_workflow(shows_en_workflow, shows_best)
+shows_final_fit <- fit(shows_final_workflow, shows_train)
+```
+
+And finally, we can fit it to our testing sets and look at how it performed with our new data.
+
+## Final Model Performance
+
+```{r}
+movies_final_test <- augment(movies_final_fit, new_data=movies_test) %>%
+  dplyr::select(MAIN_GENRE, starts_with(".pred"))
+movies_final_test$MAIN_GENRE <- factor(movies_final_test$MAIN_GENRE)
+roc_auc(movies_final_test, truth=MAIN_GENRE,
+        .pred_comedy:.pred_crime:.pred_documentary:.pred_drama:.pred_fantasy:.pred_horror:.pred_romance:.pred_scifi:.pred_thriller) %>%
+  kable()
+
+shows_final_test <- augment(shows_final_fit, new_data=shows_test) %>%
+  select(MAIN_GENRE, starts_with(".pred"))
+shows_final_test$MAIN_GENRE <- factor(shows_final_test$MAIN_GENRE)
+roc_auc(shows_final_test, truth=MAIN_GENRE,
+        .pred_action:.pred_comedy:.pred_crime:.pred_documentary:.pred_drama:.pred_scifi:.pred_war) %>%
+  kable()
+```
+
+The ROC AUC value of our model for movies was 0.551, and the value for shows was 0.721. Evidently, our model did not do the best on our movies dataset. It might have overfitted to our training set, resulting in a lower ROC AUC for our testing set. On the other hand, our model did very well for shows. We can say that our model is able to predict shows better than it is able to predict movies.
+
+Because the ROC AUC values were quite similar when we tested them on our training dataset, it might be worth exploring the results of some of the other models on our testing datasets for movies to see if they can produce a higher ROC AUC. In particular, we are interested in the random forest and boosted decision tree models. We will be using the same steps to fit our models to our testing data.
+
+```{r}
+movies_best_forest <- select_best(movies_forest_tune, metric="roc_auc")
+movies_final_workflow_forest <- finalize_workflow(movies_forest_workflow, movies_best_forest)
+movies_final_fit_forest <- fit(movies_final_workflow_forest, movies_train)
+
+movies_final_test_forest <- augment(movies_final_fit_forest, new_data=movies_test) %>%
+  dplyr::select(MAIN_GENRE, starts_with(".pred"))
+movies_final_test_forest$MAIN_GENRE <- factor(movies_final_test_forest$MAIN_GENRE)
+roc_auc(movies_final_test_forest, truth=MAIN_GENRE,
+        .pred_comedy:.pred_crime:.pred_documentary:.pred_drama:.pred_fantasy:.pred_horror:.pred_romance:.pred_scifi:.pred_thriller) %>%
+  kable()
+
+movies_best_bt <- select_best(movies_bt_tune, metric="roc_auc")
+movies_final_workflow_bt <- finalize_workflow(movies_bt_workflow, movies_best_bt)
+movies_final_fit_bt <- fit(movies_final_workflow_bt, movies_train)
+
+movies_final_test_bt <- augment(movies_final_fit_bt, new_data=movies_test) %>%
+  dplyr::select(MAIN_GENRE, starts_with(".pred"))
+movies_final_test_bt$MAIN_GENRE <- factor(movies_final_test_bt$MAIN_GENRE)
+roc_auc(movies_final_test_bt, truth=MAIN_GENRE,
+        .pred_comedy:.pred_crime:.pred_documentary:.pred_drama:.pred_fantasy:.pred_horror:.pred_romance:.pred_scifi:.pred_thriller) %>%
+  kable()
+```
+
+Interestingly, the boosted trees model fits the movies testing dataset much better with an ROC AUC of 0.603. This is still not as high as the ROC AUC for shows, but it is an improvement from the elastic net model.
+
+### Why is this happening?
+
+The reason the elastic net model produced a lower ROC AUC when fitted to our testing dataset is likely because the model overfitted to the training data. It is also because we did not have that many predictors in our movies dataset, so that might have caused the elastic net model to not be the best at predicting.
+
+### Variable Importance
+
+Let's take a look at the variable importance graph using the vip function. This tells us which predictors were the most important in determining the genre of a movie or show. For movies, the duration, number of votes, score, and the interaction between the number of votes and score were the most important. For shows, the region and release year take up the top spots of the chart.
+
+```{r}
+movies_final_fit_bt %>%
+  extract_fit_parsnip() %>%
+  vip()
+
+shows_final_fit %>%
+  extract_fit_parsnip() %>%
+  vip()
+```
+
+# Conclusion
+
+Through this project, we learned that the best predictors for a movie's genre are the duration, number of votes, and score of the movie on IMBd, and the best predictors for a show's genre are the region and release year. Surprisingly, the predictors are very different. After fitting multiple models to both our datasets, we come to the conclusion that the best model for movies is the boosted trees model and the best for shows is the elastic net model. However, both models, especially in predicting movies, have much room for improvement.
+
+One of our main issues was that we did not have that many predictor variables to start with. Given more, our models might have turned out a lot more accurate. It might also be worth looking into other models such as the Naive Bayes and Support Vector Machine models. Having a larger dataset with more observations would also help our model. We were trying to predict a factor with many levels, and some of these levels only contained a few observations. If there was more data for each main genre, our model would be better trained.
+
+# Sources
+
+This dataset was taken from the Kaggle dataset "**Netflix TV Shows and Movies".**
